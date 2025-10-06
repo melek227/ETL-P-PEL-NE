@@ -1,0 +1,99 @@
+version: 2
+
+sources:
+  - name: crm
+    description: CRM system data
+    tables:
+      - name: customers
+        description: Customer master data
+        columns:
+          - name: customer_id
+            description: Unique customer identifier
+            tests:
+              - unique
+              - not_null
+          - name: email
+            description: Customer email address
+            tests:
+              - unique
+      
+      - name: sales
+        description: Sales transaction data
+        columns:
+          - name: sale_id
+            description: Unique sale identifier
+            tests:
+              - unique
+              - not_null
+          - name: customer_id
+            description: Customer reference
+            tests:
+              - not_null
+              - relationships:
+                  to: source('crm', 'customers')
+                  field: customer_id
+
+  - name: erp
+    description: ERP system data
+    tables:
+      - name: products
+        description: Product master data
+        columns:
+          - name: product_id
+            description: Unique product identifier
+            tests:
+              - unique
+              - not_null
+      
+      - name: inventory
+        description: Current inventory levels
+        columns:
+          - name: inventory_id
+            description: Unique inventory record identifier
+            tests:
+              - unique
+              - not_null
+          - name: product_id
+            description: Product reference
+            tests:
+              - not_null
+              - relationships:
+                  to: source('erp', 'products')
+                  field: product_id
+
+models:
+  - name: stg_crm_customers
+    description: Staged CRM customer data
+    columns:
+      - name: customer_id
+        description: Unique customer identifier
+        tests:
+          - unique
+          - not_null
+
+  - name: stg_crm_sales
+    description: Staged CRM sales data
+    columns:
+      - name: sale_id
+        description: Unique sale identifier
+        tests:
+          - unique
+          - not_null
+
+  - name: customer_summary
+    description: Customer performance summary
+    columns:
+      - name: customer_id
+        description: Unique customer identifier
+        tests:
+          - unique
+          - not_null
+
+  - name: product_performance
+    description: Product performance metrics
+    columns:
+      - name: product_id
+        description: Unique product identifier
+        tests:
+          - unique
+          - not_null

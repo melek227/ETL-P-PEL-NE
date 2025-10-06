@@ -1,0 +1,15 @@
+crm_erp_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: postgres
+      user: airflow
+      password: airflow
+      port: 5432
+      dbname: airflow
+      schema: raw
+      threads: 4
+      keepalives_idle: 0
+      connect_timeout: 10
+      retries: 1

@@ -1,0 +1,98 @@
+version: 2
+
+sources:
+  - name: raw
+    description: "Raw data from CRM and ERP systems"
+    tables:
+      - name: crm_customers
+        description: "Customer data from CRM system"
+        columns:
+          - name: customer_id
+            description: "Unique customer identifier"
+            tests:
+              - unique
+              - not_null
+          - name: email
+            description: "Customer email address"
+            tests:
+              - unique
+              - not_null
+      
+      - name: erp_orders
+        description: "Order data from ERP system" 
+        columns:
+          - name: order_id
+            description: "Unique order identifier"
+            tests:
+              - unique
+              - not_null
+          - name: customer_id
+            description: "Reference to customer"
+            tests:
+              - not_null
+          - name: quantity
+            description: "Order quantity"
+            tests:
+              - not_null
+              - dbt_utils.accepted_range:
+                  min_value: 0
+          - name: unit_price
+            description: "Unit price"
+            tests:
+              - not_null
+              - dbt_utils.accepted_range:
+                  min_value: 0
+
+models:
+  - name: stg_crm_customers
+    description: "Cleaned and standardized CRM customer data"
+    columns:
+      - name: customer_id
+        description: "Unique customer identifier"
+        tests:
+          - unique
+          - not_null
+      - name: has_valid_email
+        description: "Flag indicating valid email format"
+        tests:
+          - not_null
+
+  - name: stg_erp_orders
+    description: "Cleaned and enriched ERP order data"
+    columns:
+      - name: order_id
+        description: "Unique order identifier"
+        tests:
+          - unique
+          - not_null
+      - name: total_amount
+        description: "Calculated total order amount"
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+
+  - name: int_customer_metrics
+    description: "Customer-level aggregated metrics"
+    columns:
+      - name: customer_id
+        description: "Unique customer identifier"
+        tests:
+          - unique
+          - not_null
+      - name: total_revenue
+        description: "Total customer lifetime value"
+        tests:
+          - not_null
+
+  - name: executive_dashboard  
+    description: "Executive KPI dashboard metrics"
+    columns:
+      - name: metric_name
+        description: "Name of the business metric"
+        tests:
+          - not_null
+      - name: metric_value
+        description: "Current value of the metric"
+        tests:
+          - not_null

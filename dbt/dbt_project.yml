@@ -1,0 +1,41 @@
+name: 'crm_erp_analytics'
+version: '1.0.0'
+config-version: 2
+
+# Profil ayarları
+profile: 'crm_erp_analytics'
+
+# Model paths
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+# Build configuration
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Model configurations
+models:
+  crm_erp_analytics:
+    # Raw/staging models
+    staging:
+      +materialized: view
+      +schema: staging
+    # Intermediate models  
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+    # Final marts
+    marts:
+      +materialized: table
+      +schema: marts
+
+# Tests configuration
+tests:
+  +store_failures: true
+  +schema: test_results
