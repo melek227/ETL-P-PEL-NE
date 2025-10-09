@@ -5,6 +5,9 @@ from airflow.operators.python_operator import PythonOperator
 from airflow.operators.bash_operator import BashOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 import logging
+import csv
+import os
+from minio import Minio
 
 # Default arguments
 default_args = {
@@ -55,6 +58,32 @@ def extract_crm_data(**context):
         
         crm_records = pg_hook.get_records(crm_extract_sql)
         logging.info(f"Extracted {len(crm_records)} records from CRM system")
+
+        # Ham verileri CSV'ye kaydet ve MinIO'ya yükle
+        if crm_records:
+            csv_filename = f"crm_customers_{context['ds_nodash']}.csv" if 'ds_nodash' in context else "crm_customers.csv"
+            csv_path = os.path.join("/tmp", csv_filename)
+            with open(csv_path, mode="w", newline='', encoding="utf-8") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(["customer_id", "customer_name", "email", "phone", "city", "status", "registration_date", "created_at"])
+                for row in crm_records:
+                    writer.writerow(row)
+
+            # MinIO bağlantı ayarları
+            minio_client = Minio(
+                endpoint="localhost:9000",  # MinIO sunucu adresi
+                access_key="minioadmin",
+                secret_key="minioadmin",
+                secure=False
+            )
+            bucket_name = "raw-data"
+            # Bucket yoksa oluştur
+            found = minio_client.bucket_exists(bucket_name)
+            if not found:
+                minio_client.make_bucket(bucket_name)
+            # Dosyayı yükle
+            minio_client.fput_object(bucket_name, csv_filename, csv_path)
+            logging.info(f"Ham CRM verisi MinIO'ya yüklendi: {csv_filename}")
         
         # Raw tabloya yükle
         if crm_records:
@@ -107,6 +136,30 @@ def extract_erp_data(**context):
         
         erp_records = pg_hook.get_records(erp_extract_sql)
         logging.info(f"Extracted {len(erp_records)} order records from ERP system")
+
+        # Ham ERP verilerini CSV'ye kaydet ve MinIO'ya yükle
+        if erp_records:
+            csv_filename = f"erp_orders_{context['ds_nodash']}.csv" if 'ds_nodash' in context else "erp_orders.csv"
+            csv_path = os.path.join("/tmp", csv_filename)
+            with open(csv_path, mode="w", newline='', encoding="utf-8") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(["order_id", "customer_id", "product_name", "quantity", "unit_price", "total_amount", "order_date", "order_status", "customer_name", "created_at"])
+                for row in erp_records:
+                    writer.writerow(row)
+
+            # MinIO bağlantı ayarları
+            minio_client = Minio(
+                endpoint="localhost:9000",
+                access_key="minioadmin",
+                secret_key="minioadmin",
+                secure=False
+            )
+            bucket_name = "raw-data"
+            found = minio_client.bucket_exists(bucket_name)
+            if not found:
+                minio_client.make_bucket(bucket_name)
+            minio_client.fput_object(bucket_name, csv_filename, csv_path)
+            logging.info(f"Ham ERP verisi MinIO'ya yüklendi: {csv_filename}")
         
         # Raw tabloya yükle
         if erp_records:
@@ -132,6 +185,8 @@ def extract_erp_data(**context):
     except Exception as e:
         logging.error(f"❌ ERP ETL Connector failed: {str(e)}")
         raise
+
+
 
 def validate_data(**context):
     """Çekilen verilerin kalitesini kontrol eder"""
@@ -162,6 +217,8 @@ def validate_data(**context):
     
     logging.info("Data validation completed successfully")
     return {"crm_count": crm_count, "erp_count": erp_count, "today_orders": today_orders}
+
+
 
 def generate_business_metrics(**context):
     """İş metrikleri hesaplar"""
@@ -206,6 +263,8 @@ def generate_business_metrics(**context):
     logging.info(f"Business Metrics: {metrics}")
     return metrics
 
+
+
 # PostgreSQL bağlantı kontrolü
 postgres_sensor = BashOperator(
     task_id='check_postgres_connection',
@@ -233,22 +292,66 @@ validate_data_task = PythonOperator(
     dag=dag
 )
 
-# dbt transformation - staging işlemi (PostgreSQL ile)
-dbt_staging_task = BashOperator(
+
+
+
+# dbt işlemlerini PythonOperator ile çalıştıran fonksiyonlar
+import subprocess
+
+def run_dbt_staging(**context):
+    """dbt staging modellerini çalıştırır ve PostgreSQL bağlantısını kontrol eder"""
+    try:
+        # PostgreSQL bağlantı kontrolü
+        pg_hook = PostgresHook(postgres_conn_id='postgres_default')
+        pg_hook.get_conn()  # Bağlantı başarılıysa hata vermez
+        logging.info("PostgreSQL bağlantısı başarılı!")
+        # dbt staging çalıştır
+        result = subprocess.run(['dbt', 'run', '--select', 'staging'], cwd='./datalake', capture_output=True, text=True)
+        logging.info(result.stdout)
+        if result.returncode != 0:
+            logging.error(result.stderr)
+            raise Exception("dbt staging çalıştırılamadı!")
+    except Exception as e:
+        logging.error(f"dbt staging hatası: {str(e)}")
+        raise
+
+def run_dbt_intermediate(**context):
+    try:
+        result = subprocess.run(['dbt', 'run', '--select', 'intermediate'], cwd='./datalake', capture_output=True, text=True)
+        logging.info(result.stdout)
+        if result.returncode != 0:
+            logging.error(result.stderr)
+            raise Exception("dbt intermediate çalıştırılamadı!")
+    except Exception as e:
+        logging.error(f"dbt intermediate hatası: {str(e)}")
+        raise
+
+def run_dbt_marts(**context):
+    try:
+        result = subprocess.run(['dbt', 'run', '--select', 'marts'], cwd='./datalake', capture_output=True, text=True)
+        logging.info(result.stdout)
+        if result.returncode != 0:
+            logging.error(result.stderr)
+            raise Exception("dbt marts çalıştırılamadı!")
+    except Exception as e:
+        logging.error(f"dbt marts hatası: {str(e)}")
+        raise
+
+dbt_staging_task = PythonOperator(
     task_id='dbt_run_staging',
-    bash_command='echo "✅ dbt staging models simulated - Data cleaned and standardized"',
+    python_callable=run_dbt_staging,
     dag=dag
 )
 
-dbt_intermediate_task = BashOperator(
+dbt_intermediate_task = PythonOperator(
     task_id='dbt_run_intermediate',
-    bash_command='echo "✅ dbt intermediate models simulated - Business logic applied"',
+    python_callable=run_dbt_intermediate,
     dag=dag
 )
 
-dbt_marts_task = BashOperator(
+dbt_marts_task = PythonOperator(
     task_id='dbt_run_marts',
-    bash_command='echo "✅ dbt marts models simulated - Final analytical tables ready"',
+    python_callable=run_dbt_marts,
     dag=dag
 )
 
@@ -262,7 +365,7 @@ business_metrics_task = PythonOperator(
 # Data quality tests
 dbt_test_task = BashOperator(
     task_id='dbt_run_tests',
-    bash_command='echo "✅ dbt data quality tests passed - All checks successful"',
+    bash_command='cd ./datalake && dbt test',
     dag=dag
 )
 
