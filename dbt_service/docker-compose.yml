@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  dbt-service:
+    build: .
+    container_name: dbt_service
+    environment:
+      - DBT_PROJECT_DIR=/opt/dbt
+    volumes:
+      - ../dbt:/opt/dbt
+    depends_on:
+      - postgres
+    ports:
+      - "8001:8001"

@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  producer:
+    build: .
+    container_name: producer_service
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=etl_events
+    depends_on:
+      - kafka
+    ports:
+      - "8000:8000"
+    command: uvicorn main:app --host 0.0.0.0 --port 8000

@@ -395,10 +395,80 @@ extract_erp_task = PythonOperator(
     dag=dag
 )
 
+
 # Data Lake'den Raw tablolara yükleme
 load_from_datalake_task = PythonOperator(
     task_id='load_from_data_lake_to_raw',
     python_callable=load_from_data_lake_to_raw,
+    dag=dag
+)
+
+# Streaming order eventlerini MinIO'dan okuyup customer ile birleştirip hız ihlali/sipariş analizi yapan task
+def analyze_orders_with_customers(**context):
+    """MinIO'dan order eventlerini ve customer verisini okuyup hız ihlali/sipariş analizi yapar"""
+    from minio import Minio
+    import pandas as pd
+    import glob
+    import tempfile
+    import io
+    logging.info("Order ve customer verisi ile analiz başlatılıyor...")
+    minio_client = Minio(
+        endpoint="localhost:9000",
+        access_key="minioadmin",
+        secret_key="minioadmin",
+        secure=False
+    )
+    bucket_name = "etl-raw"
+    # 1. Customer verisini MinIO'dan oku (ör: raw/crm/crm_*.json)
+    customer_df = None
+    try:
+        # Son customer dosyasını bul
+        objects = minio_client.list_objects("data-lake", prefix="raw/crm/", recursive=True)
+        customer_files = [obj.object_name for obj in objects if obj.object_name.endswith('.json')]
+        if customer_files:
+            latest_customer = sorted(customer_files)[-1]
+            response = minio_client.get_object("data-lake", latest_customer)
+            customer_data = json.load(io.BytesIO(response.read()))
+            customer_df = pd.DataFrame(customer_data)
+    except Exception as e:
+        logging.warning(f"Customer verisi okunamadı: {e}")
+        return
+    # 2. Order eventlerini MinIO'dan oku (raw/order/ altındaki tüm .json dosyaları)
+    order_events = []
+    try:
+        objects = minio_client.list_objects(bucket_name, prefix="raw/order/", recursive=True)
+        for obj in objects:
+            if obj.object_name.endswith('.json'):
+                response = minio_client.get_object(bucket_name, obj.object_name)
+                event = json.load(io.BytesIO(response.read()))
+                order_events.append(event)
+    except Exception as e:
+        logging.warning(f"Order eventleri okunamadı: {e}")
+        return
+    if not order_events or customer_df is None or customer_df.empty:
+        logging.warning("Analiz için yeterli veri yok.")
+        return
+    order_df = pd.DataFrame(order_events)
+    # 3. Join işlemi (ör: customer_id üzerinden)
+    if 'customer_id' in order_df.columns and 'customer_id' in customer_df.columns:
+        merged = order_df.merge(customer_df, on='customer_id', how='left', suffixes=('_order', '_customer'))
+    else:
+        logging.warning("customer_id alanı bulunamadı, join yapılamadı.")
+        return
+    # 4. Hız ihlali/sipariş analizi örneği (ör: hız_ihlali_flag veya benzeri bir alan varsa)
+    if 'hiz_ihlali_flag' in merged.columns:
+        ihlal_olanlar = merged[merged['hiz_ihlali_flag'] == True]
+        oran = len(ihlal_olanlar) / len(merged)
+        logging.info(f"Hız ihlali oranı: {oran:.2%}")
+    else:
+        logging.info(f"Birleştirilmiş sipariş/müşteri kaydı: {len(merged)}")
+    # 5. Sonuçları logla veya başka bir yere kaydet
+    logging.info("Analiz tamamlandı.")
+    return merged.to_dict(orient='records')
+
+analyze_orders_task = PythonOperator(
+    task_id='analyze_orders_with_customers',
+    python_callable=analyze_orders_with_customers,
     dag=dag
 )
 
@@ -482,14 +552,18 @@ dbt_test_task = PythonOperator(
     dag=dag
 )
 
+
 # Task dependencies - ETL pipeline akışı
-# Kaynak sistem → MinIO → Raw Tables → dbt akışı
+# Kaynak sistem → MinIO → Raw Tables → dbt akışı + streaming order analizi
 postgres_sensor >> [extract_crm_task, extract_erp_task]
 [extract_crm_task, extract_erp_task] >> load_from_datalake_task
 load_from_datalake_task >> dbt_staging_task
 dbt_staging_task >> dbt_intermediate_task
 dbt_intermediate_task >> dbt_marts_task
 dbt_marts_task >> dbt_test_task
+
+# Streaming order analizi, batch yükleme ve dbt işlemlerinden bağımsız tetiklenebilir
+analyze_orders_task
 
 
 
@@ -498,3 +572,7 @@ dbt_marts_task >> dbt_test_task
 # Stop-Process -Id (Get-NetTCPConnection -LocalPort 5432).OwningProcess -Force
 
 #dbeaver-ce &
+
+# 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
+
+

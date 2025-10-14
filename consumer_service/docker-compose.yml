@@ -1,0 +1,10 @@
+version: '3.8'
+services:
+  consumer:
+    build: .
+    container_name: consumer_service
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=etl_events
+    depends_on:
+      - kafka
