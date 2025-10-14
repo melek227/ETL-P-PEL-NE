@@ -7,7 +7,60 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 import logging
 import csv
 import os
+import json
+import pickle
 from minio import Minio
+
+def save_to_data_lake(data, data_type, context):
+    """Veriyi otomatik format detection ile Data Lake'e kaydet"""
+    
+    minio_client = Minio(
+        endpoint="localhost:9000",
+        access_key="minioadmin", 
+        secret_key="minioadmin",
+        secure=False
+    )
+    bucket_name = "data-lake"
+    
+    # Bucket yoksa oluştur
+    found = minio_client.bucket_exists(bucket_name)
+    if not found:
+        minio_client.make_bucket(bucket_name)
+    
+    timestamp = context.get('ds_nodash', datetime.now().strftime('%Y%m%d'))
+    
+    # Veri formatını otomatik belirle ve kaydet
+    if isinstance(data[0], (list, tuple)):  # Structured data
+        # CSV formatında kaydet
+        filename = f"{data_type}_{timestamp}.csv"
+        file_path = os.path.join("/tmp", filename)
+        
+        with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            for row in data:
+                writer.writerow(row)
+        
+    elif isinstance(data[0], dict):  # Dictionary data
+        # JSON formatında kaydet
+        filename = f"{data_type}_{timestamp}.json"
+        file_path = os.path.join("/tmp", filename)
+        
+        with open(file_path, 'w', encoding='utf-8') as jsonfile:
+            json.dump(data, jsonfile, indent=2, ensure_ascii=False, default=str)
+    
+    else:  # Other formats - pickle as fallback
+        filename = f"{data_type}_{timestamp}.pkl"
+        file_path = os.path.join("/tmp", filename)
+        
+        with open(file_path, 'wb') as pklfile:
+            pickle.dump(data, pklfile)
+    
+    # MinIO'ya yükle
+    object_name = f"raw/{data_type}/{filename}"
+    minio_client.fput_object(bucket_name, object_name, file_path)
+    logging.info(f"Ham veri Data Lake'e yüklendi: {object_name} (Format: {filename.split('.')[-1]})")
+    
+    return object_name, filename.split('.')[-1]
 
 # Default arguments
 default_args = {
@@ -59,48 +112,11 @@ def extract_crm_data(**context):
         crm_records = pg_hook.get_records(crm_extract_sql)
         logging.info(f"Extracted {len(crm_records)} records from CRM system")
 
-        # Ham verileri CSV'ye kaydet ve MinIO'ya yükle
+        # Ham verileri Data Lake'e kaydet
         if crm_records:
-            csv_filename = f"crm_customers_{context['ds_nodash']}.csv" if 'ds_nodash' in context else "crm_customers.csv"
-            csv_path = os.path.join("/tmp", csv_filename)
-            with open(csv_path, mode="w", newline='', encoding="utf-8") as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(["customer_id", "customer_name", "email", "phone", "city", "status", "registration_date", "created_at"])
-                for row in crm_records:
-                    writer.writerow(row)
-
-            # MinIO bağlantı ayarları
-            minio_client = Minio(
-                endpoint="localhost:9000",  # MinIO sunucu adresi
-                access_key="minioadmin",
-                secret_key="minioadmin",
-                secure=False
-            )
-            bucket_name = "raw-data"
-            # Bucket yoksa oluştur
-            found = minio_client.bucket_exists(bucket_name)
-            if not found:
-                minio_client.make_bucket(bucket_name)
-            # Dosyayı yükle
-            minio_client.fput_object(bucket_name, csv_filename, csv_path)
-            logging.info(f"Ham CRM verisi MinIO'ya yüklendi: {csv_filename}")
+            save_to_data_lake(crm_records, "crm", context)
         
-        # Raw tabloya yükle
-        if crm_records:
-            for record in crm_records:
-                insert_sql = """
-                    INSERT INTO raw.crm_customers (customer_id, customer_name, email, phone, city, extracted_at) 
-                    VALUES (%s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (customer_id) DO UPDATE SET 
-                        customer_name = EXCLUDED.customer_name,
-                        email = EXCLUDED.email,
-                        phone = EXCLUDED.phone,
-                        city = EXCLUDED.city,
-                        extracted_at = EXCLUDED.extracted_at;
-                """
-                pg_hook.run(insert_sql, parameters=record[:5])  # İlk 5 alanı al
-        
-        logging.info(f"✅ CRM ETL Connector: Loaded {len(crm_records)} customer records to data warehouse")
+        logging.info(f"✅ CRM ETL Connector: Extracted {len(crm_records)} customer records and saved to Data Lake")
         return len(crm_records)
         
     except Exception as e:
@@ -137,49 +153,12 @@ def extract_erp_data(**context):
         erp_records = pg_hook.get_records(erp_extract_sql)
         logging.info(f"Extracted {len(erp_records)} order records from ERP system")
 
-        # Ham ERP verilerini CSV'ye kaydet ve MinIO'ya yükle
+        # Ham ERP verilerini Data Lake'e yükle (raw tabloya yükleme load_from_data_lake_to_raw task'ında yapılacak)
         if erp_records:
-            csv_filename = f"erp_orders_{context['ds_nodash']}.csv" if 'ds_nodash' in context else "erp_orders.csv"
-            csv_path = os.path.join("/tmp", csv_filename)
-            with open(csv_path, mode="w", newline='', encoding="utf-8") as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(["order_id", "customer_id", "product_name", "quantity", "unit_price", "total_amount", "order_date", "order_status", "customer_name", "created_at"])
-                for row in erp_records:
-                    writer.writerow(row)
-
-            # MinIO bağlantı ayarları
-            minio_client = Minio(
-                endpoint="localhost:9000",
-                access_key="minioadmin",
-                secret_key="minioadmin",
-                secure=False
-            )
-            bucket_name = "raw-data"
-            found = minio_client.bucket_exists(bucket_name)
-            if not found:
-                minio_client.make_bucket(bucket_name)
-            minio_client.fput_object(bucket_name, csv_filename, csv_path)
-            logging.info(f"Ham ERP verisi MinIO'ya yüklendi: {csv_filename}")
+            save_to_data_lake(erp_records, "erp", context)
+            logging.info(f"ERP verisi Data Lake'e kaydedildi")
         
-        # Raw tabloya yükle
-        if erp_records:
-            for record in erp_records:
-                insert_sql = """
-                    INSERT INTO raw.erp_orders (order_id, customer_id, product_name, quantity, unit_price, order_date, extracted_at) 
-                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (order_id) DO UPDATE SET 
-                        customer_id = EXCLUDED.customer_id,
-                        product_name = EXCLUDED.product_name,
-                        quantity = EXCLUDED.quantity,
-                        unit_price = EXCLUDED.unit_price,
-                        order_date = EXCLUDED.order_date,
-                        extracted_at = EXCLUDED.extracted_at;
-                """
-                # order_id, customer_id, product_name, quantity, unit_price, order_date
-                params = (record[0], record[1], record[2], record[3], record[4], record[6])
-                pg_hook.run(insert_sql, parameters=params)
-        
-        logging.info(f"✅ ERP ETL Connector: Loaded {len(erp_records)} order records to data warehouse")
+        logging.info(f"✅ ERP ETL Connector: Extracted {len(erp_records)} order records and saved to Data Lake")
         return len(erp_records)
         
     except Exception as e:
@@ -188,80 +167,211 @@ def extract_erp_data(**context):
 
 
 
-def validate_data(**context):
-    """Çekilen verilerin kalitesini kontrol eder"""
-    logging.info("Starting data validation...")
+def load_from_data_lake_to_raw(**context):
+    """MinIO'dan veriyi okuyup raw tablolara yükler - Genel format destekli"""
+    logging.info("Loading data from Data Lake to Raw tables...")
     
-    pg_hook = PostgresHook(postgres_conn_id='postgres_default')
-    
-    # CRM veri kontrolü
-    crm_count = pg_hook.get_first("SELECT COUNT(*) FROM raw.crm_customers")[0]
-    logging.info(f"CRM kayıt sayısı: {crm_count}")
-    
-    # ERP veri kontrolü  
-    erp_count = pg_hook.get_first("SELECT COUNT(*) FROM raw.erp_orders")[0]
-    logging.info(f"ERP kayıt sayısı: {erp_count}")
-    
-    # Veri kalite kontrolleri
-    invalid_emails = pg_hook.get_first("SELECT COUNT(*) FROM raw.crm_customers WHERE email NOT LIKE '%@%'")[0]
-    if invalid_emails > 0:
-        logging.warning(f"{invalid_emails} geçersiz email adresi bulundu")
-    
-    negative_prices = pg_hook.get_first("SELECT COUNT(*) FROM raw.erp_orders WHERE unit_price <= 0")[0]
-    if negative_prices > 0:
-        logging.warning(f"{negative_prices} negatif fiyat bulundu")
-    
-    # Bugünkü siparişleri kontrol et
-    today_orders = pg_hook.get_first("SELECT COUNT(*) FROM raw.erp_orders WHERE DATE(order_date) = CURRENT_DATE")[0]
-    logging.info(f"Bugünkü sipariş sayısı: {today_orders}")
-    
-    logging.info("Data validation completed successfully")
-    return {"crm_count": crm_count, "erp_count": erp_count, "today_orders": today_orders}
-
-
-
-def generate_business_metrics(**context):
-    """İş metrikleri hesaplar"""
-    logging.info("Generating business metrics...")
-    
-    pg_hook = PostgresHook(postgres_conn_id='postgres_default')
-    
-    # Toplam satış tutarı
-    total_revenue = pg_hook.get_first("""
-        SELECT COALESCE(SUM(quantity * unit_price), 0) as total_revenue 
-        FROM raw.erp_orders 
-        WHERE DATE(order_date) >= DATE_TRUNC('month', CURRENT_DATE)
-    """)[0]
-    
-    # En çok satın alan müşteri
-    top_customer = pg_hook.get_first("""
-        SELECT c.customer_name, SUM(o.quantity * o.unit_price) as total_spent
-        FROM raw.crm_customers c
-        JOIN raw.erp_orders o ON c.customer_id = o.customer_id
-        GROUP BY c.customer_id, c.customer_name
-        ORDER BY total_spent DESC
-        LIMIT 1
-    """)
-    
-    # En popüler ürün
-    top_product = pg_hook.get_first("""
-        SELECT product_name, SUM(quantity) as total_quantity
-        FROM raw.erp_orders
-        GROUP BY product_name
-        ORDER BY total_quantity DESC
-        LIMIT 1
-    """)
-    
-    metrics = {
-        'total_revenue': float(total_revenue) if total_revenue else 0,
-        'top_customer': top_customer[0] if top_customer else 'N/A',
-        'top_customer_spent': float(top_customer[1]) if top_customer else 0,
-        'top_product': top_product[0] if top_product else 'N/A',
-        'top_product_quantity': int(top_product[1]) if top_product else 0
-    }
-    
-    logging.info(f"Business Metrics: {metrics}")
-    return metrics
+    try:
+        
+        # MinIO client
+        minio_client = Minio(
+            endpoint="localhost:9000",
+            access_key="minioadmin",
+            secret_key="minioadmin",
+            secure=False
+        )
+        bucket_name = "data-lake"
+        pg_hook = PostgresHook(postgres_conn_id='postgres_default')
+        
+        timestamp = context.get('ds_nodash', datetime.now().strftime('%Y%m%d'))
+        
+        # CRM verilerini yükle
+        try:
+            # Önce hangi formatta olduğunu kontrol et
+            for ext in ['csv', 'json', 'pkl']:
+                object_name = f"raw/crm/crm_{timestamp}.{ext}"
+                try:
+                    response = minio_client.get_object(bucket_name, object_name)
+                    file_path = f"/tmp/crm_temp.{ext}"
+                    
+                    with open(file_path, 'wb') as f:
+                        for data in response.stream(32*1024):
+                            f.write(data)
+                    
+                    # Format'a göre veriyi oku ve raw tabloya yükle
+                    if ext == 'csv':
+                        with open(file_path, 'r', encoding='utf-8') as csvfile:
+                            reader = csv.reader(csvfile)
+                            for row in reader:
+                                if len(row) >= 5:  # Minimum alan sayısı kontrolü
+                                    insert_sql = """
+                                        INSERT INTO raw.crm_customers (customer_id, customer_name, email, phone, city, extracted_at) 
+                                        VALUES (%s, %s, %s, %s, %s, NOW())
+                                        ON CONFLICT (customer_id) DO UPDATE SET 
+                                            customer_name = EXCLUDED.customer_name,
+                                            email = EXCLUDED.email,
+                                            phone = EXCLUDED.phone,
+                                            city = EXCLUDED.city,
+                                            extracted_at = EXCLUDED.extracted_at;
+                                    """
+                                    pg_hook.run(insert_sql, parameters=row[:5])
+                    
+                    elif ext == 'json':
+                        with open(file_path, 'r', encoding='utf-8') as jsonfile:
+                            data = json.load(jsonfile)
+                            for record in data:
+                                if isinstance(record, dict):
+                                    # Dict'ten veriyi çıkar
+                                    params = [
+                                        record.get('customer_id'),
+                                        record.get('customer_name'),
+                                        record.get('email'),
+                                        record.get('phone'),
+                                        record.get('city')
+                                    ]
+                                else:
+                                    # Liste/tuple formatı
+                                    params = record[:5]
+                                
+                                if params[0] is not None:  # customer_id kontrolü
+                                    insert_sql = """
+                                        INSERT INTO raw.crm_customers (customer_id, customer_name, email, phone, city, extracted_at) 
+                                        VALUES (%s, %s, %s, %s, %s, NOW())
+                                        ON CONFLICT (customer_id) DO UPDATE SET 
+                                            customer_name = EXCLUDED.customer_name,
+                                            email = EXCLUDED.email,
+                                            phone = EXCLUDED.phone,
+                                            city = EXCLUDED.city,
+                                            extracted_at = EXCLUDED.extracted_at;
+                                    """
+                                    pg_hook.run(insert_sql, parameters=params)
+                    
+                    elif ext == 'pkl':
+                        with open(file_path, 'rb') as pklfile:
+                            data = pickle.load(pklfile)
+                            for record in data:
+                                if len(record) >= 5:
+                                    insert_sql = """
+                                        INSERT INTO raw.crm_customers (customer_id, customer_name, email, phone, city, extracted_at) 
+                                        VALUES (%s, %s, %s, %s, %s, NOW())
+                                        ON CONFLICT (customer_id) DO UPDATE SET 
+                                            customer_name = EXCLUDED.customer_name,
+                                            email = EXCLUDED.email,
+                                            phone = EXCLUDED.phone,
+                                            city = EXCLUDED.city,
+                                            extracted_at = EXCLUDED.extracted_at;
+                                    """
+                                    pg_hook.run(insert_sql, parameters=record[:5])
+                    
+                    logging.info(f"✅ CRM verisi Data Lake'den raw tabloya yüklendi: {object_name}")
+                    break
+                    
+                except Exception as e:
+                    continue  # Bu format yoksa diğerini dene
+                    
+        except Exception as e:
+            logging.warning(f"CRM verisi Data Lake'den yüklenemedi: {str(e)}")
+        
+        # ERP verilerini yükle
+        try:
+            # Önce hangi formatta olduğunu kontrol et
+            for ext in ['csv', 'json', 'pkl']:
+                object_name = f"raw/erp/erp_{timestamp}.{ext}"
+                try:
+                    response = minio_client.get_object(bucket_name, object_name)
+                    file_path = f"/tmp/erp_temp.{ext}"
+                    
+                    with open(file_path, 'wb') as f:
+                        for data in response.stream(32*1024):
+                            f.write(data)
+                    
+                    # Format'a göre veriyi oku ve raw tabloya yükle
+                    if ext == 'csv':
+                        with open(file_path, 'r', encoding='utf-8') as csvfile:
+                            reader = csv.reader(csvfile)
+                            for row in reader:
+                                if len(row) >= 6:  # Minimum alan sayısı kontrolü
+                                    insert_sql = """
+                                        INSERT INTO raw.erp_orders (order_id, customer_id, product_name, quantity, unit_price, order_date, extracted_at) 
+                                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                                        ON CONFLICT (order_id) DO UPDATE SET 
+                                            customer_id = EXCLUDED.customer_id,
+                                            product_name = EXCLUDED.product_name,
+                                            quantity = EXCLUDED.quantity,
+                                            unit_price = EXCLUDED.unit_price,
+                                            order_date = EXCLUDED.order_date,
+                                            extracted_at = EXCLUDED.extracted_at;
+                                    """
+                                    # order_id, customer_id, product_name, quantity, unit_price, order_date
+                                    params = (row[0], row[1], row[2], row[3], row[4], row[6])
+                                    pg_hook.run(insert_sql, parameters=params)
+                    
+                    elif ext == 'json':
+                        with open(file_path, 'r', encoding='utf-8') as jsonfile:
+                            data = json.load(jsonfile)
+                            for record in data:
+                                if isinstance(record, dict):
+                                    # Dict'ten veriyi çıkar
+                                    params = [
+                                        record.get('order_id'),
+                                        record.get('customer_id'),
+                                        record.get('product_name'),
+                                        record.get('quantity'),
+                                        record.get('unit_price'),
+                                        record.get('order_date')
+                                    ]
+                                else:
+                                    # Liste/tuple formatı
+                                    params = (record[0], record[1], record[2], record[3], record[4], record[6])
+                                
+                                if params[0] is not None:  # order_id kontrolü
+                                    insert_sql = """
+                                        INSERT INTO raw.erp_orders (order_id, customer_id, product_name, quantity, unit_price, order_date, extracted_at) 
+                                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                                        ON CONFLICT (order_id) DO UPDATE SET 
+                                            customer_id = EXCLUDED.customer_id,
+                                            product_name = EXCLUDED.product_name,
+                                            quantity = EXCLUDED.quantity,
+                                            unit_price = EXCLUDED.unit_price,
+                                            order_date = EXCLUDED.order_date,
+                                            extracted_at = EXCLUDED.extracted_at;
+                                    """
+                                    pg_hook.run(insert_sql, parameters=params)
+                    
+                    elif ext == 'pkl':
+                        with open(file_path, 'rb') as pklfile:
+                            data = pickle.load(pklfile)
+                            for record in data:
+                                if len(record) >= 6:
+                                    insert_sql = """
+                                        INSERT INTO raw.erp_orders (order_id, customer_id, product_name, quantity, unit_price, order_date, extracted_at) 
+                                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                                        ON CONFLICT (order_id) DO UPDATE SET 
+                                            customer_id = EXCLUDED.customer_id,
+                                            product_name = EXCLUDED.product_name,
+                                            quantity = EXCLUDED.quantity,
+                                            unit_price = EXCLUDED.unit_price,
+                                            order_date = EXCLUDED.order_date,
+                                            extracted_at = EXCLUDED.extracted_at;
+                                    """
+                                    # order_id, customer_id, product_name, quantity, unit_price, order_date
+                                    params = (record[0], record[1], record[2], record[3], record[4], record[6])
+                                    pg_hook.run(insert_sql, parameters=params)
+                    
+                    logging.info(f"✅ ERP verisi Data Lake'den raw tabloya yüklendi: {object_name}")
+                    break
+                    
+                except Exception as e:
+                    continue  # Bu format yoksa diğerini dene
+                    
+        except Exception as e:
+            logging.warning(f"ERP verisi Data Lake'den yüklenemedi: {str(e)}")
+        
+        logging.info("✅ Data Lake'den Raw tablolara yükleme tamamlandı")
+        
+    except Exception as e:
+        logging.error(f"❌ Data Lake'den yükleme hatası: {str(e)}")
+        raise
 
 
 
@@ -285,10 +395,10 @@ extract_erp_task = PythonOperator(
     dag=dag
 )
 
-# Veri kalite kontrolü
-validate_data_task = PythonOperator(
-    task_id='validate_data',
-    python_callable=validate_data,
+# Data Lake'den Raw tablolara yükleme
+load_from_datalake_task = PythonOperator(
+    task_id='load_from_data_lake_to_raw',
+    python_callable=load_from_data_lake_to_raw,
     dag=dag
 )
 
@@ -306,7 +416,7 @@ def run_dbt_staging(**context):
         pg_hook.get_conn()  # Bağlantı başarılıysa hata vermez
         logging.info("PostgreSQL bağlantısı başarılı!")
         # dbt staging çalıştır
-        result = subprocess.run(['dbt', 'run', '--select', 'staging'], cwd='./datalake', capture_output=True, text=True)
+        result = subprocess.run(['dbt', 'run', '--select', 'staging'], cwd='/opt/dbt', capture_output=True, text=True)
         logging.info(result.stdout)
         if result.returncode != 0:
             logging.error(result.stderr)
@@ -317,7 +427,7 @@ def run_dbt_staging(**context):
 
 def run_dbt_intermediate(**context):
     try:
-        result = subprocess.run(['dbt', 'run', '--select', 'intermediate'], cwd='./datalake', capture_output=True, text=True)
+        result = subprocess.run(['dbt', 'run', '--select', 'intermediate'], cwd='/opt/dbt', capture_output=True, text=True)
         logging.info(result.stdout)
         if result.returncode != 0:
             logging.error(result.stderr)
@@ -328,7 +438,7 @@ def run_dbt_intermediate(**context):
 
 def run_dbt_marts(**context):
     try:
-        result = subprocess.run(['dbt', 'run', '--select', 'marts'], cwd='./datalake', capture_output=True, text=True)
+        result = subprocess.run(['dbt', 'run', '--select', 'marts'], cwd='/opt/dbt', capture_output=True, text=True)
         logging.info(result.stdout)
         if result.returncode != 0:
             logging.error(result.stderr)
@@ -355,51 +465,36 @@ dbt_marts_task = PythonOperator(
     dag=dag
 )
 
-# İş metrikleri hesaplama
-business_metrics_task = PythonOperator(
-    task_id='generate_business_metrics',
-    python_callable=generate_business_metrics,
-    dag=dag
-)
 
-# Data quality tests
-dbt_test_task = BashOperator(
+
+
+def run_dbt_tests(**context):
+    import subprocess
+    result = subprocess.run(['dbt', 'test'], cwd='/opt/dbt', capture_output=True, text=True)
+    logging.info(result.stdout)
+    if result.returncode != 0:
+        logging.error(result.stderr)
+        raise Exception("dbt test çalıştırılamadı!")
+
+dbt_test_task = PythonOperator(
     task_id='dbt_run_tests',
-    bash_command='cd ./datalake && dbt test',
-    dag=dag
-)
-
-# Final rapor oluşturma
-generate_report_task = BashOperator(
-    task_id='generate_final_report',
-    bash_command="""
-    echo "======================================="
-    echo "ETL Pipeline Execution Report"
-    echo "======================================="
-    echo "Pipeline execution completed at: $(date)"
-    echo "Data processing steps:"
-    echo "✓ CRM data extracted from source systems"
-    echo "✓ ERP order data extracted and validated"
-    echo "✓ Data quality checks passed"
-    echo "✓ dbt transformations applied (staging → intermediate → marts)"
-    echo "✓ Business metrics calculated"
-    echo "✓ Data quality tests executed"
-    echo "======================================="
-    echo "Check the following schemas for results:"
-    echo "- raw: Raw extracted data"
-    echo "- staging: Cleaned and standardized data"
-    echo "- intermediate: Business logic applied"
-    echo "- marts: Final analytical tables"
-    echo "======================================="
-    """,
+    python_callable=run_dbt_tests,
     dag=dag
 )
 
 # Task dependencies - ETL pipeline akışı
+# Kaynak sistem → MinIO → Raw Tables → dbt akışı
 postgres_sensor >> [extract_crm_task, extract_erp_task]
-[extract_crm_task, extract_erp_task] >> validate_data_task
-validate_data_task >> dbt_staging_task
+[extract_crm_task, extract_erp_task] >> load_from_datalake_task
+load_from_datalake_task >> dbt_staging_task
 dbt_staging_task >> dbt_intermediate_task
 dbt_intermediate_task >> dbt_marts_task
-dbt_marts_task >> [business_metrics_task, dbt_test_task]
-[business_metrics_task, dbt_test_task] >> generate_report_task
+dbt_marts_task >> dbt_test_task
+
+
+
+# Get-Process -Id (Get-NetTCPConnection -LocalPort 5432).OwningProcess
+
+# Stop-Process -Id (Get-NetTCPConnection -LocalPort 5432).OwningProcess -Force
+
+#dbeaver-ce &

@@ -18,6 +18,10 @@ RUN mkdir -p /opt/airflow/.dbt \
 
 USER airflow
 
+# requirements.txt dosyasını kopyala ve minio dahil paketleri yükle
+COPY requirements.txt /requirements.txt
+RUN pip install --no-cache-dir -r /requirements.txt
+
 RUN pip install --no-cache-dir \
     dbt-postgres==1.8.2 \
     dbt-core==1.8.2 \

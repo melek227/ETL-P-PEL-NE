@@ -4,43 +4,49 @@
 WITH cleaned_customers AS (
     SELECT 
         customer_id,
-        UPPER(TRIM(customer_name)) as customer_name_clean,
-        LOWER(TRIM(email)) as email_clean,
-        TRIM(phone) as phone_clean,
-        UPPER(TRIM(city)) as city_clean,
-        LOWER(TRIM(status)) as status_clean,
+        UPPER(TRIM(customer_name)) AS customer_name_clean,
+        LOWER(TRIM(email)) AS email_clean,
+        TRIM(phone) AS phone_clean,
+        UPPER(TRIM(city)) AS city_clean,
+        LOWER(TRIM(status)) AS status_clean,
         registration_date,
         extracted_at,
+
         -- Veri kalite flagleri
         CASE 
             WHEN customer_name IS NULL OR TRIM(customer_name) = '' THEN FALSE
             ELSE TRUE 
-        END as has_valid_name,
+        END AS has_valid_name,
+
         CASE 
             WHEN email IS NULL OR email NOT LIKE '%@%' THEN FALSE
             ELSE TRUE 
-        END as has_valid_email,
+        END AS has_valid_email,
+
         -- Kayıt yaşı (gün olarak)
-        EXTRACT(days FROM (CURRENT_DATE - registration_date::date)) as days_since_registration
+        (CURRENT_DATE - registration_date::date) AS days_since_registration
+
     FROM {{ source('raw', 'crm_customers') }}
 )
 
 SELECT 
     customer_id,
-    customer_name_clean as customer_name,
-    email_clean as email,
-    phone_clean as phone,  
-    city_clean as city,
-    status_clean as status,
+    customer_name_clean AS customer_name,
+    email_clean AS email,
+    phone_clean AS phone,  
+    city_clean AS city,
+    status_clean AS status,
     registration_date,
     extracted_at,
     has_valid_name,
     has_valid_email,
     days_since_registration,
+
     -- Müşteri segmentasyonu
     CASE 
         WHEN days_since_registration < 30 THEN 'Yeni Müşteri'
         WHEN days_since_registration < 365 THEN 'Aktif Müşteri' 
         ELSE 'Eski Müşteri'
-    END as customer_segment
+    END AS customer_segment
+
 FROM cleaned_customers

@@ -2,6 +2,7 @@ version: 2
 
 sources:
   - name: raw
+    schema: raw
     description: "Raw data from CRM and ERP systems"
     tables:
       - name: crm_customers
