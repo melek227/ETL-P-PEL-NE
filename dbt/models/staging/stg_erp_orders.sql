@@ -5,9 +5,11 @@ WITH cleaned_orders AS (
     SELECT 
         order_id,
         customer_id,
-        TRIM(product_name) as product_name_clean,
+        product_id,
         quantity,
         unit_price,
+        total_amount,
+        status,
         order_date,
         extracted_at,
         -- Hesaplanan alanlar
@@ -18,8 +20,8 @@ WITH cleaned_orders AS (
             ELSE FALSE 
         END as has_valid_amounts,
         CASE 
-            WHEN product_name IS NULL OR TRIM(product_name) = '' THEN FALSE
-            ELSE TRUE 
+            WHEN product_id IS NOT NULL THEN TRUE
+            ELSE FALSE 
         END as has_valid_product,
         -- Tarih bazlı alanlar
         EXTRACT(year FROM order_date) as order_year,
@@ -32,10 +34,11 @@ WITH cleaned_orders AS (
 SELECT 
     order_id,
     customer_id,
-    product_name_clean as product_name,
+    product_id,
     quantity,
     unit_price,
-    calculated_total as total_amount,
+    total_amount,
+    status,
     order_date,
     extracted_at,
     has_valid_amounts,
@@ -46,8 +49,8 @@ SELECT
     order_year_month,
     -- Sipariş kategorileri
     CASE 
-        WHEN calculated_total < 1000 THEN 'Küçük Sipariş'
-        WHEN calculated_total < 10000 THEN 'Orta Sipariş'
+        WHEN total_amount < 100 THEN 'Küçük Sipariş'
+        WHEN total_amount < 500 THEN 'Orta Sipariş'
         ELSE 'Büyük Sipariş'
     END as order_category
 FROM cleaned_orders

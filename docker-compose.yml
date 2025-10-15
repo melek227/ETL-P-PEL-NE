@@ -15,6 +15,9 @@ x-airflow-common:
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
     _PIP_ADDITIONAL_REQUIREMENTS: ''
+    # Auto-create critical connections
+    AIRFLOW_CONN_POSTGRES_DEFAULT: postgresql://airflow:airflow@postgres:5432/airflow
+    AIRFLOW_CONN_MSSQL_CRM: mssql+pymssql://sa:YourStrong!Passw0rd@mssql_crm:1433
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -49,8 +52,15 @@ services:
     environment:
       - KAFKA_BROKER=kafka:9092
       - KAFKA_TOPIC=etl_events
+      - MINIO_ENDPOINT=object-store:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=etl-raw
     depends_on:
       - kafka
+      - object-store
+    ports:
+      - "8001:8001"
   nginx:
     image: nginx:latest
     container_name: nginx_gateway
@@ -72,13 +82,15 @@ services:
     depends_on:
       - postgres
     ports:
-      - "8001:8001"
+      - "8003:8003"
   postgres:
     image: postgres:13
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
@@ -86,6 +98,26 @@ services:
       interval: 10s
       retries: 5
       start_period: 5s
+    restart: always
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    container_name: mssql_crm
+    user: "0:0"
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=YourStrong!Passw0rd
+      - MSSQL_PID=Developer
+    ports:
+      - "1434:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      test: /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P YourStrong!Passw0rd -Q "SELECT 1" || exit 1
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     restart: always
 
   zookeeper:
@@ -98,20 +130,21 @@ services:
     restart: always
 
   kafka:
-    image: confluentinc/cp-kafka:7.5.0
-    depends_on:
-      - zookeeper
-    ports:
-      - "9092:9092"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-    restart: always
-    volumes:
-      - kafka-data:/var/lib/kafka/data
+   image: confluentinc/cp-kafka:7.5.0
+   depends_on:
+    - zookeeper
+   ports:
+    - "9092:9092"
+   environment:
+    KAFKA_BROKER_ID: 1
+    KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+    KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+    KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+   restart: always
+   volumes:
+    - kafka-data:/var/lib/kafka/data
+
 
   redis:
     image: redis:latest
@@ -254,3 +287,4 @@ volumes:
   postgres-db-volume:
   minio-data:
   kafka-data:
+  mssql-data:
