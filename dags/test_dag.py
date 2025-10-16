@@ -1,4 +1,17 @@
 from datetime import datetime, timedelta
+# ----------------------------
+# Default DAG args
+# ----------------------------
+default_args = {
+    'owner': 'etl-team',
+    'depends_on_past': False,
+    'start_date': datetime(2024, 1, 1),
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 0,
+    'retry_delay': timedelta(minutes=5),
+}
+from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -31,20 +44,9 @@ def save_to_data_lake(data, data_type, context):
         pass
     minio_client.fput_object(bucket_name, object_name, file_path)
     logging.info(f"Ham veri Data Lake'e yüklendi: {object_name}")
+
     return object_name
 
-# ----------------------------
-# Default DAG args
-# ----------------------------
-default_args = {
-    'owner': 'etl-team',
-    'depends_on_past': False,
-    'start_date': datetime(2024, 1, 1),
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 0,
-    'retry_delay': timedelta(minutes=5),
-}
 
 # ----------------------------
 # DAG tanımı
@@ -53,7 +55,7 @@ dag = DAG(
     'crm_erp_etl_pipeline',
     default_args=default_args,
     description='CRM + ERP ETL pipeline with Data Lake, raw tables, analysis, and dbt',
-    schedule_interval='@daily',
+    schedule_interval='0 */6 * * *',  # Her 6 saatte bir (00:00, 06:00, 12:00, 18:00)
     catchup=False,
     max_active_runs=1,
     tags=['etl', 'crm', 'erp', 'dbt']
@@ -195,44 +197,23 @@ load_from_datalake_task = PythonOperator(
 )
 
 # ----------------------------
-# 3️⃣ Analyze Orders with Customers
+# DAG Dependencies
 # ----------------------------
-def analyze_orders_with_customers(**context):
-    logging.info("Analiz başlatılıyor...")
-    minio_client = Minio(endpoint="minio:9000", access_key="minioadmin", secret_key="minioadmin", secure=False)
 
-    # CRM
-    objects = minio_client.list_objects("data-lake", prefix="raw/crm/", recursive=True)
-    crm_files=[obj.object_name for obj in objects if obj.object_name.endswith('.json')]
-    if not crm_files: return
-    latest_crm=sorted(crm_files)[-1]
-    resp=minio_client.get_object("data-lake",latest_crm)
-    crm_df=pd.DataFrame(json.load(io.BytesIO(resp.read())))
+[init_raw_tables_task, extract_crm_task] >> load_from_datalake_task
 
-    # Orders
-    objects = minio_client.list_objects("data-lake", prefix="raw/order/", recursive=True)
-    order_files=[obj.object_name for obj in objects if obj.object_name.endswith('.json')]
-    if not order_files: return
-    latest_order=sorted(order_files)[-1]
-    resp=minio_client.get_object("data-lake",latest_order)
-    order_df=pd.DataFrame(json.load(io.BytesIO(resp.read())))
+# ----------------------------
+# 4️⃣ Run DBT models
+# ----------------------------
+from airflow.operators.bash import BashOperator
 
-    # Merge
-    merged=order_df.merge(crm_df, on='customer_id', how='left', suffixes=('_order','_customer'))
-    logging.info(f"Birleştirilmiş kayıt sayısı: {len(merged)}")
-    return merged.to_dict(orient='records')
-
-analyze_orders_task = PythonOperator(
-    task_id='analyze_orders_with_customers',
-    python_callable=analyze_orders_with_customers,
+dbt_run_task = BashOperator(
+    task_id='run_dbt_models',
+    bash_command='cd /opt/dbt && dbt run',
     dag=dag
 )
 
-# ----------------------------
-# DAG Dependencies
-# ----------------------------
-[init_raw_tables_task, extract_crm_task] >> load_from_datalake_task
-load_from_datalake_task >> analyze_orders_task
+load_from_datalake_task >> dbt_run_task
 
 
 # Get-Process -Id (Get-NetTCPConnection -LocalPort 5432).OwningProcess
