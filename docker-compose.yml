@@ -38,29 +38,38 @@ services:
       context: ./producer_service
     container_name: producer_service
     environment:
-      - KAFKA_BROKER=kafka:9092
+      - KAFKA_BROKER=kafka-1:9092,kafka-2:9092,kafka-3:9092
       - KAFKA_TOPIC=etl_events
     depends_on:
-      - kafka
+      - kafka-1
+      - kafka-2
+      - kafka-3
+      - kafka-init
     ports:
       - "8000:8000"
 
   consumer_service:
     build:
       context: ./consumer_service
-    container_name: consumer_service
+    # container_name kaldırıldı - scale için gerekli!
     environment:
-      - KAFKA_BROKER=kafka:9092
+      - KAFKA_BROKER=kafka-1:9092,kafka-2:9092,kafka-3:9092
       - KAFKA_TOPIC=etl_events
+      - KAFKA_CONSUMER_GROUP=etl_group  # Aynı group'ta olmalılar!
       - MINIO_ENDPOINT=object-store:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=etl-raw
     depends_on:
-      - kafka
+      - kafka-1
+      - kafka-2
+      - kafka-3
+      - kafka-init
       - object-store
-    ports:
-      - "8001:8001"
+    # Port kaldırıldı - scale için çakışmasın
+    # API endpoint'leri içeriden erişilebilir
+    deploy:
+      replicas: 3  # 3 instance çalışsın!
   nginx:
     image: nginx:latest
     container_name: nginx_gateway
@@ -122,6 +131,7 @@ services:
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -129,21 +139,112 @@ services:
       - "2181:2181"
     restart: always
 
-  kafka:
-   image: confluentinc/cp-kafka:7.5.0
-   depends_on:
-    - zookeeper
-   ports:
-    - "9092:9092"
-   environment:
-    KAFKA_BROKER_ID: 1
-    KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-    KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
-    KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-   restart: always
-   volumes:
-    - kafka-data:/var/lib/kafka/data
+ 
+  kafka-1:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-1
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+    restart: always
+    volumes:
+      - kafka-1-data:/var/lib/kafka/data
+
+  
+  kafka-2:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-2
+    depends_on:
+      - zookeeper
+    ports:
+      - "9093:9092"
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+    restart: always
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+
+  
+  kafka-3:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-3
+    depends_on:
+      - zookeeper
+    ports:
+      - "9094:9092"
+    environment:
+      KAFKA_BROKER_ID: 3
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+    restart: always
+    volumes:
+      - kafka-3-data:/var/lib/kafka/data
+
+  
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-init
+    depends_on:
+      - kafka-1
+      - kafka-2
+      - kafka-3
+    entrypoint: ['/bin/bash', '-c']
+    command: |
+      "
+      echo 'Waiting for Kafka brokers to be ready...'
+      sleep 10
+      
+      echo 'Creating topics with partitions...'
+      
+      # Topic 1: etl_events (3 partition, 3 replica)
+      kafka-topics --create --if-not-exists \
+        --topic etl_events \
+        --partitions 3 \
+        --replication-factor 3 \
+        --bootstrap-server kafka-1:9092,kafka-2:9092,kafka-3:9092
+      
+      # Topic 2: crm_data (5 partition, 3 replica)
+      kafka-topics --create --if-not-exists \
+        --topic crm_data \
+        --partitions 5 \
+        --replication-factor 3 \
+        --bootstrap-server kafka-1:9092,kafka-2:9092,kafka-3:9092
+      
+      # Topic 3: erp_data (5 partition, 3 replica)
+      kafka-topics --create --if-not-exists \
+        --topic erp_data \
+        --partitions 5 \
+        --replication-factor 3 \
+        --bootstrap-server kafka-1:9092,kafka-2:9092,kafka-3:9092
+      
+      echo 'Listing all topics:'
+      kafka-topics --list --bootstrap-server kafka-1:9092
+      
+      echo 'Topic details:'
+      kafka-topics --describe --bootstrap-server kafka-1:9092
+      
+      echo 'Kafka topics initialized successfully!'
+      "
+    restart: on-failure
 
 
   redis:
@@ -286,5 +387,7 @@ services:
 volumes:
   postgres-db-volume:
   minio-data:
-  kafka-data:
+  kafka-1-data:
+  kafka-2-data:
+  kafka-3-data:
   mssql-data:

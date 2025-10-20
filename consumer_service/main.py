@@ -13,8 +13,9 @@ from typing import List, Dict, Any
 import threading
 import queue
 
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka-1:9092,kafka-2:9092,kafka-3:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "etl_events")
+KAFKA_CONSUMER_GROUP = os.getenv("KAFKA_CONSUMER_GROUP", "etl_group")
 
 # MinIO bağlantı ayarları
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
@@ -54,10 +55,13 @@ try:
 except Exception as e:
     print(f"MinIO bucket oluşturma hatası: {e}")
 
+
+
+
 # Event'leri saklamak için in-memory queue (son 100 event)
 recent_events = queue.Queue(maxsize=100)
 consumer_running = False
-consumer_thread = None
+consumer_threads = []
 
 def process_event(event):
     """Event'i MinIO'ya yaz ve queue'ya ekle"""
@@ -103,29 +107,31 @@ def process_event(event):
         print(f"Bilinmeyen hata: {e}")
         return False
 
-def consume_messages():
-    """Background thread'de Kafka'dan mesaj oku"""
+def consume_partition(partition):
+    """Belirli bir partition için Kafka'dan mesaj oku (thread)"""
     global consumer_running
+    brokers = KAFKA_BROKER.split(',')
     consumer = KafkaConsumer(
         KAFKA_TOPIC,
-        bootstrap_servers=KAFKA_BROKER,
+        bootstrap_servers=brokers,
         value_deserializer=lambda m: json.loads(m.decode('utf-8')),
         auto_offset_reset='earliest',
         enable_auto_commit=True,
-        group_id='etl_group'
+        group_id=KAFKA_CONSUMER_GROUP,
+        max_poll_records=500,
+        session_timeout_ms=30000,
+        heartbeat_interval_ms=10000
     )
-    
-    print("Kafka consumer başlatıldı...")
-    consumer_running = True
-    
+    consumer.assign([partition])
+    print(f"✅ Partition {partition.partition} için consumer başlatıldı.")
     try:
         for message in consumer:
             if not consumer_running:
                 break
+            print(f"📨 Partition {message.partition}, Offset {message.offset}: {message.value}")
             process_event(message.value)
     finally:
         consumer.close()
-        consumer_running = False
 
 # Root endpoint
 @app.get("/")
@@ -162,34 +168,45 @@ def health_check():
 # Consumer yönetimi
 @app.post("/consumer/start")
 def start_consumer(background_tasks: BackgroundTasks):
-    """Kafka consumer'ı başlat"""
-    global consumer_running, consumer_thread
-    
+    """Her partition için ayrı consumer başlat"""
+    global consumer_running, consumer_threads
     if consumer_running:
         return {"status": "already_running", "message": "Consumer zaten çalışıyor"}
-    
-    consumer_thread = threading.Thread(target=consume_messages, daemon=True)
-    consumer_thread.start()
-    
+    brokers = KAFKA_BROKER.split(',')
+    # Partition bilgilerini almak için geçici consumer
+    temp_consumer = KafkaConsumer(
+        KAFKA_TOPIC,
+        bootstrap_servers=brokers,
+        group_id=KAFKA_CONSUMER_GROUP
+    )
+    partitions = temp_consumer.partitions_for_topic(KAFKA_TOPIC)
+    temp_consumer.close()
+    consumer_threads = []
+    consumer_running = True
+    for p in partitions:
+        partition = kafka.TopicPartition(KAFKA_TOPIC, p)
+        t = threading.Thread(target=consume_partition, args=(partition,), daemon=True)
+        consumer_threads.append(t)
+        t.start()
     return {
         "status": "started",
-        "message": "Kafka consumer başlatıldı",
+        "message": f"{len(partitions)} partition için consumer başlatıldı",
         "kafka_topic": KAFKA_TOPIC
     }
 
 @app.post("/consumer/stop")
 def stop_consumer():
-    """Kafka consumer'ı durdur"""
-    global consumer_running
-    
+    """Tüm consumer thread'lerini durdur"""
+    global consumer_running, consumer_threads
     if not consumer_running:
         return {"status": "already_stopped", "message": "Consumer zaten durmuş"}
-    
     consumer_running = False
-    
+    for t in consumer_threads:
+        t.join(timeout=2)
+    consumer_threads = []
     return {
         "status": "stopped",
-        "message": "Kafka consumer durduruldu"
+        "message": "Tüm consumer thread'leri durduruldu"
     }
 
 @app.get("/consumer/status")
@@ -259,10 +276,8 @@ def get_minio_object(path: str):
 # Startup event
 @app.on_event("startup")
 def startup_event():
-    """Uygulama başlarken consumer'ı otomatik başlat"""
-    global consumer_thread
-    consumer_thread = threading.Thread(target=consume_messages, daemon=True)
-    consumer_thread.start()
+    """Uygulama başlarken her partition için consumer başlat"""
+    start_consumer(BackgroundTasks())
 
 # Shutdown event
 @app.on_event("shutdown")

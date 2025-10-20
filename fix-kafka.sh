@@ -3,3 +3,5 @@
 ✅ Tüm servisleri yeniden başlattık (docker-compose up -d)
 ✅ Consumer servisini restart ettik
 ✅ Cluster ID çakışması sorunu çözüldü!
+
+

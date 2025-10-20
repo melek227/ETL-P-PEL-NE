@@ -7,7 +7,7 @@ import json, os
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka-1:9092,kafka-2:9092,kafka-3:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "etl_events")
 
 app = FastAPI(
@@ -31,13 +31,18 @@ def get_producer():
     global producer
     if producer is None:
         try:
+            # Multiple brokers için liste
+            brokers = KAFKA_BROKER.split(',')
             producer = KafkaProducer(
-                bootstrap_servers=KAFKA_BROKER,
+                bootstrap_servers=brokers,  # 3 broker listesi
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                acks='all',
+                acks='all',  # Tüm replica'lara yazılsın
                 retries=3,
-                max_block_ms=5000
+                max_block_ms=5000,
+                # Partition stratejisi (round-robin veya key-based)
+                # partitioner=lambda key, all_parts, available: hash(key) % len(all_parts) if key else 0
             )
+            print(f"✅ Kafka Producer connected to brokers: {brokers}")
         except Exception as e:
             raise HTTPException(status_code=503, detail=f"Kafka unavailable: {e}")
     return producer
@@ -61,12 +66,17 @@ def root():
 def health_check():
     try:
         p = get_producer()
+        # Broker bilgisini döndür
+        brokers = KAFKA_BROKER.split(',')
         kafka_status = "connected"
     except:
+        brokers = []
         kafka_status = "disconnected"
     return {
         "status": "healthy" if kafka_status=="connected" else "degraded",
         "kafka_status": kafka_status,
+        "kafka_brokers": brokers,
+        "kafka_topic": KAFKA_TOPIC,
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -103,3 +113,7 @@ def shutdown_event():
     global producer
     if producer:
         producer.close()
+
+
+
+

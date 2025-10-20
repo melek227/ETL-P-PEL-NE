@@ -14,6 +14,7 @@ default_args = {
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
+from airflow.models import Variable
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.providers.microsoft.mssql.hooks.mssql import MsSqlHook
 from minio import Minio
@@ -108,16 +109,46 @@ init_raw_tables_task = PythonOperator(
 # ----------------------------
 def extract_crm_data(**context):
     logging.info("CRM verisi çekiliyor...")
+    # Mevcut watermark'ı (varsayılan: şimdi - 30 gün) oku ve sadece logla
+    try:
+        last_loaded_at = Variable.get(
+            'crm_last_loaded_at',
+            default_var=(datetime.utcnow() - timedelta(days=30)).isoformat()
+        )
+        logging.info(f"Watermark (crm_last_loaded_at): {last_loaded_at}")
+    except Exception as e:
+        logging.warning(f"Watermark okunamadı, 30 gün geri varsayılacak. Hata: {e}")
+
     mssql_hook = MsSqlHook(mssql_conn_id='mssql_crm')
-    sql = """
+    # Watermark'tan 1 gün öncesini daima dahil et (bindirme için)
+    try:
+        watermark_dt = datetime.fromisoformat(last_loaded_at)
+        overlap_dt = watermark_dt - timedelta(days=1)
+        watermark_str = overlap_dt.strftime('%Y-%m-%dT%H:%M:%S')
+    except Exception as e:
+        logging.warning(f"Watermark parse edilemedi, 30 gün geri alınacak: {e}")
+        watermark_str = (datetime.utcnow() - timedelta(days=30)).strftime('%Y-%m-%dT%H:%M:%S')
+    sql = f"""
         SELECT id as customer_id, customer_name, email, phone, city, status, registration_date, created_at
         FROM crm.dbo.customers 
-        WHERE status='active' AND created_at >= DATEADD(day,-30,GETDATE())
+        WHERE status='active' AND created_at > '{watermark_str}'
         ORDER BY id;
     """
     records = mssql_hook.get_records(sql)
     if records:
         save_to_data_lake(records, "crm", context)
+        # Watermark'ı en yeni created_at ile güncelle (varsa)
+        try:
+            # created_at seçimin son sütunu, None olmayanları alıp max'ı bul
+            created_vals = [r[-1] for r in records if r and r[-1] is not None]
+            if created_vals:
+                new_watermark = max(created_vals)
+            else:
+                new_watermark = datetime.utcnow()
+            Variable.set('crm_last_loaded_at', new_watermark.isoformat())
+            logging.info(f"Watermark güncellendi: crm_last_loaded_at={new_watermark.isoformat()}")
+        except Exception as e:
+            logging.warning(f"Watermark güncellenemedi: {e}")
     logging.info(f"{len(records)} adet CRM kaydı Data Lake'e kaydedildi.")
     return len(records)
 
